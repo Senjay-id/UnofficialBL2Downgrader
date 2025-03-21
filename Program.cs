@@ -7,6 +7,7 @@ using Microsoft.Win32;
 class Program
 {
     static bool patchException = false;
+
     [STAThread]
     static void Main()
     {
@@ -19,22 +20,24 @@ class Program
                 .WriteTo.File("UBL2D.log")
                 .CreateLogger();
 
-            string gamePath = Path.Combine(GetSteamInstallPath(), "steamapps", "common", "Borderlands 2");
+            // Get the game path using the AppID or default folder name
+            string gamePath = GetSteamGamePath("49520"); // Borderlands 2 AppID
 
-            if (gamePath == null)
+            if (string.IsNullOrEmpty(gamePath))
             {
                 string gameFolder = SelectFolder("Select the game folder");
                 if (string.IsNullOrEmpty(gameFolder)) return;
 
                 gamePath = gameFolder;
             }
-            Log.Information($"Detected Game Path : {gamePath}");
+            Log.Information($"Detected Game Path: {gamePath}");
 
+            // Copy resources to the game directory
             CopyAllFilesAndDirectories(Path.Combine(Environment.CurrentDirectory, "resources", "BL2Data"), gamePath);
 
             string patchPath = Path.Combine(Environment.CurrentDirectory, "resources", "BL2Deltas");
-            
-            // filelist for downgrading from v200 to v185
+
+            // File list for downgrading from v200 to v185
             List<string> fileList = new List<string>
             {
                 "Binaries\\Win32\\Borderlands2.exe",
@@ -2467,7 +2470,7 @@ class Program
             stopwatch.Stop();
             Console.WriteLine("");
             Log.Information($"Done, Elapsed time: {stopwatch.Elapsed.TotalSeconds:F2} seconds ({stopwatch.ElapsedMilliseconds} ms)\n\n Press any key to close.");
-            
+
             if (patchException)
             {
                 Console.WriteLine("");
@@ -2478,123 +2481,102 @@ class Program
         }
         catch (Exception ex)
         {
-            Log.Error($"An error has occured: {ex}");
+            Log.Error($"An error has occurred: {ex}");
             Console.ReadKey();
         }
     }
 
-    static void bulkCreateDeltaPatch(string vanillaFolder, string moddedFolder, string outputFolder)
+    static string GetSteamGamePath(string appId)
     {
-
-
-        var vanillaFiles = Directory.GetFiles(vanillaFolder, "*.*", SearchOption.AllDirectories);
-        var moddedFiles = Directory.GetFiles(moddedFolder, "*.*", SearchOption.AllDirectories);
-
-        // Create a dictionary of modded file paths relative to the moddedFolder for quick lookup
-        var moddedFileDict = moddedFiles.ToDictionary(
-            file => Path.GetRelativePath(moddedFolder, file),
-            file => file
-        );
-
-        /*
-        Log.Information("Logging relative paths of modded files:");
-        foreach (var relativePath in moddedFileDict.Keys)
+        string steamPath = GetSteamInstallPath();
+        if (string.IsNullOrEmpty(steamPath))
         {
-            string relPath = EscapeBackslashes(relativePath);
-            File.AppendAllText("UBL2ds.log", $"\"{relPath}\",\n");
-            //Log.Information($"Modded file relative path: {relativePath}");
+            return null;
         }
-        */
 
+        List<string> steamLibraryFolders = GetSteamLibraryFolders(steamPath);
 
-        foreach (var vanillaFile in vanillaFiles)
+        foreach (var libraryFolder in steamLibraryFolders)
         {
-            string relativePath = Path.GetRelativePath(vanillaFolder, vanillaFile);
-
-            if (moddedFileDict.TryGetValue(relativePath, out string moddedFile))
+            string gamePath = Path.Combine(libraryFolder, "steamapps", "common", "Borderlands 2");
+            if (Directory.Exists(gamePath))
             {
-                string outputFile = Path.Combine(outputFolder, relativePath + ".xdelta");
-                string outputFileDir = Path.GetDirectoryName(outputFile);
-                string relPath = EscapeBackslashes(relativePath);
-                File.AppendAllText("UBL2ds.log", $"\"{relPath}\",\n");
-                mkDir(outputFileDir);
+                return gamePath;
+            }
 
-                try
+            // Also check for games installed via the "appmanifest" system
+            string appManifestPath = Path.Combine(libraryFolder, "steamapps", $"appmanifest_{appId}.acf");
+            if (File.Exists(appManifestPath))
+            {
+                string installDir = ParseAppManifestForInstallDir(appManifestPath);
+                if (!string.IsNullOrEmpty(installDir))
                 {
-                    makeDeltaPatch(vanillaFile, moddedFile, outputFile);
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"Failed to create patch for {relativePath} : {ex}");
+                    gamePath = Path.Combine(libraryFolder, "steamapps", "common", installDir);
+                    if (Directory.Exists(gamePath))
+                    {
+                        return gamePath;
+                    }
                 }
             }
-            else
-            {
-                Log.Warning($"No corresponding modded file for: {relativePath}");
-            }
         }
+
+        return null;
     }
-    static void mkDir(string path)
+
+    static List<string> GetSteamLibraryFolders(string steamPath)
     {
-        if (!Directory.Exists(path))
+        var libraryFolders = new List<string>();
+
+        libraryFolders.Add(steamPath);
+
+        // Parse the libraryfolders.vdf file to find additional library folders
+        string libraryFoldersVdfPath = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
+        if (File.Exists(libraryFoldersVdfPath))
         {
-            Directory.CreateDirectory(path);
-        }
-    }
-    static void makeDeltaPatch(string sourceFilePath, string modifiedFilePath, string patchFilePath)
-    {
-        byte[] originalData = File.ReadAllBytes(sourceFilePath);
-        byte[] modifiedData = File.ReadAllBytes(modifiedFilePath);
-
-        var delta = Xdelta3Lib.Encode(source: originalData, target: modifiedData).ToArray();
-
-        File.WriteAllBytes(patchFilePath, delta);
-        Log.Information($"Created xdelta patch for {Path.GetFileName(sourceFilePath)}");
-    }
-
-    static void ApplyDeltaPatches(List<string> vanillaFilePaths, List<string> patchFilePaths)
-    {
-        for (int i = 0; i < vanillaFilePaths.Count; i++)
-        {
-            string vanillaFilePath = vanillaFilePaths[i];
-            string patchFilePath = patchFilePaths[i] + ".xdelta";
-            string outputFilePath = vanillaFilePath;
-
-            if (File.Exists(vanillaFilePath) && File.Exists(patchFilePath))
+            try
             {
-                try
+                string[] lines = File.ReadAllLines(libraryFoldersVdfPath);
+                foreach (var line in lines)
                 {
-                    applyDeltaPatch(vanillaFilePath, patchFilePath, outputFilePath);
-                    Log.Information($"Patched {vanillaFilePath}");
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"Failed to apply patch for {vanillaFilePath} : {ex}");
-
-                    if (!patchException)
-                        patchException = true;
+                    if (line.Contains("path"))
+                    {
+                        string path = line.Split('"')[3]; // Extract the path from the line
+                        libraryFolders.Add(path);
+                    }
                 }
             }
-            else
+            catch (Exception ex)
             {
-                Log.Warning($"File not found: {vanillaFilePath} or {patchFilePath}");
+                Log.Error($"Error reading libraryfolders.vdf: {ex.Message}");
             }
         }
+
+        return libraryFolders;
     }
 
-    static void applyDeltaPatch(string sourceFilePath, string patchFilePath, string outputFilePath)
+    static string ParseAppManifestForInstallDir(string appManifestPath)
     {
-        byte[] originalData = File.ReadAllBytes(sourceFilePath);
-        byte[] patchData = File.ReadAllBytes(patchFilePath);
+        try
+        {
+            string[] lines = File.ReadAllLines(appManifestPath);
+            foreach (var line in lines)
+            {
+                if (line.Contains("installdir"))
+                {
+                    return line.Split('"')[3]; // Extract the installdir value
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Error reading appmanifest: {ex.Message}");
+        }
 
-        byte[] patchedData = Xdelta3Lib.Decode(source: originalData, delta: patchData).ToArray();
-
-        File.WriteAllBytes(outputFilePath, patchedData);
+        return null;
     }
 
     static string GetSteamInstallPath()
     {
-        // Check both 64-bit and 32-bit registry paths
         string[] registryPaths = new[]
         {
             @"SOFTWARE\Wow6432Node\Valve\Steam",
@@ -2641,10 +2623,8 @@ class Program
 
     static void CopyAllFilesAndDirectories(string sourceDir, string targetDir)
     {
-        // Create the target directory if it doesn't exist
         Directory.CreateDirectory(targetDir);
 
-        // Copy all files
         foreach (string file in Directory.GetFiles(sourceDir))
         {
             string fileName = Path.GetFileName(file);
@@ -2653,7 +2633,6 @@ class Program
             Log.Debug($"Copied {file} into {destFile}");
         }
 
-        // Recursively copy subdirectories
         foreach (string subDir in Directory.GetDirectories(sourceDir))
         {
             string destSubDir = Path.Combine(targetDir, Path.GetFileName(subDir));
@@ -2661,9 +2640,48 @@ class Program
         }
     }
 
+    static void ApplyDeltaPatches(List<string> vanillaFilePaths, List<string> patchFilePaths)
+    {
+        for (int i = 0; i < vanillaFilePaths.Count; i++)
+        {
+            string vanillaFilePath = vanillaFilePaths[i];
+            string patchFilePath = patchFilePaths[i] + ".xdelta";
+            string outputFilePath = vanillaFilePath;
+
+            if (File.Exists(vanillaFilePath) && File.Exists(patchFilePath))
+            {
+                try
+                {
+                    applyDeltaPatch(vanillaFilePath, patchFilePath, outputFilePath);
+                    Log.Information($"Patched {vanillaFilePath}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error($"Failed to apply patch for {vanillaFilePath} : {ex}");
+
+                    if (!patchException)
+                        patchException = true;
+                }
+            }
+            else
+            {
+                Log.Warning($"File not found: {vanillaFilePath} or {patchFilePath}");
+            }
+        }
+    }
+
+    static void applyDeltaPatch(string sourceFilePath, string patchFilePath, string outputFilePath)
+    {
+        byte[] originalData = File.ReadAllBytes(sourceFilePath);
+        byte[] patchData = File.ReadAllBytes(patchFilePath);
+
+        byte[] patchedData = Xdelta3Lib.Decode(source: originalData, delta: patchData).ToArray();
+
+        File.WriteAllBytes(outputFilePath, patchedData);
+    }
+
     static string EscapeBackslashes(string input)
     {
         return input.Replace("\\", "\\\\");
     }
 }
-
